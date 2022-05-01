@@ -1,7 +1,7 @@
 'use strict';
 const { sanitizeEntity } = require('strapi-utils');
 
-const stripe = require('stripe')(process.env.STRIPE_PK)
+const stripe = require('stripe')(process.env.STRIPE_SK)
 
 /**
  * Given a dollar amount number, convert it to it's value in cents
@@ -42,22 +42,47 @@ module.exports = {
         return sanitizeEntity(entity, { model: strapi.models.order });
     },
 
+    async createPaymentIntent(ctx) {
+      const { product } = ctx.request.body;
+
+      if(!product){
+        ctx.throw(400, "Please add a product to body");
+      }
+
+      // Retrieve the real product here
+      const realProduct = await strapi.services.product.findOne({ id: product.id })
+      if(!realProduct){
+        ctx.throw(404, "This product doesn't exist");
+      }
+
+      // Create a PaymentIntent with the order amount and currency
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: fromDecimalToInt(realProduct.price),
+        currency: "eur",
+        automatic_payment_methods: {
+          enabled: true,
+        },
+      });
+      return { clientSecret: paymentIntent.client_secret }
+    },
+
 
     async create(ctx) {
         const BASE_URL = ctx.request.headers.origin || 'http://localhost:3000' //So we can redirect back
 
-        const { product } = ctx.request.body
+        const { product } = ctx.request.body;
+
         if(!product){
-            return res.status(400).send({error: "Please add a product to body"})
+          ctx.throw(400, "Please add a product to body");
         }
 
-        //Retrieve the real product here
+        // Retrieve the real product here
         const realProduct = await strapi.services.product.findOne({ id: product.id })
         if(!realProduct){
-            return res.status(404).send({error: "This product doesn't exist"})
+          ctx.throw(404, "This product doesn't exist");
         }
 
-        const {user} = ctx.state //From Magic Plugin
+        const { user } = ctx.state // From Magic Plugin
 
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ["card", "ideal"],
@@ -66,18 +91,18 @@ module.exports = {
                     price_data: {
                         currency: "eur",
                         product_data: {
-                            name: realProduct.name
+                            name: realProduct.title,
                         },
                         unit_amount: fromDecimalToInt(realProduct.price),
                     },
                     quantity: 1,
                 },
             ],
-            customer_email: user.email, //Automatically added by Magic Link
+            customer_email: user.email, // Automatically added by Magic Link
             mode: "payment",
             success_url: `${BASE_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: BASE_URL,
-        })
+        });
 
         //TODO Create Temp Order here
         const newOrder = await strapi.services.order.create({
@@ -85,7 +110,7 @@ module.exports = {
             product: realProduct.id,
             Total: realProduct.price,
             Status: 'unpaid',
-          CheckoutSession: session.id
+            CheckoutSession: session.id
         })
 
         return { id: session.id }
